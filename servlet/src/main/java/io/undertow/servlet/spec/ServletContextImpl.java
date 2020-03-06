@@ -848,6 +848,41 @@ public class ServletContextImpl implements ServletContext {
 
     public HttpSessionImpl getSession(final ServletContextImpl originalServletContext, final HttpServerExchange exchange, boolean create) {
         SessionConfig c = originalServletContext.getSessionConfig();
+
+                if (originalServletContext != this) {
+                    //this is a cross context request
+                    //we need to make sure there is a top level session
+                    final HttpSessionImpl topLevel = originalServletContext.getSession(originalServletContext, exchange, true);
+                    //override the session id to just return the same ID as the top level session
+
+                    c = new SessionConfig() {
+                        @Override
+                        public void setSessionId(HttpServerExchange exchange, String sessionId) {
+                            //noop
+                        }
+
+                        @Override
+                        public void clearSession(HttpServerExchange exchange, String sessionId) {
+                            //noop
+                        }
+
+                        @Override
+                        public String findSessionId(HttpServerExchange exchange) {
+                            return topLevel.getId();
+                        }
+
+                        @Override
+                        public SessionCookieSource sessionCookieSource(HttpServerExchange exchange) {
+                            return SessionCookieSource.NONE;
+                        }
+
+                        @Override
+                        public String rewriteUrl(String originalUrl, String sessionId) {
+                            return null;
+                        }
+                    };
+                }
+
         HttpSessionImpl httpSession = exchange.getAttachment(sessionAttachmentKey);
         if (httpSession != null && httpSession.isInvalid()) {
             exchange.removeAttachment(sessionAttachmentKey);
