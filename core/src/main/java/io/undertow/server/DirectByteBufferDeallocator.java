@@ -108,12 +108,14 @@ public final class DirectByteBufferDeallocator {
 
     private static void cleanBuffer(ByteBuffer buffer) throws InvocationTargetException, IllegalAccessException {
         if (buffer != null) {
-            if (UNSAFE != null) {
-                //use the JDK9 method
-                cleanerClean.invoke(UNSAFE, buffer);
-            } else {
-                Object cleaner = DirectByteBufferDeallocator.cleaner.invoke(buffer);
-                cleanerClean.invoke(cleaner);
+            synchronized (buffer) {
+                if (UNSAFE != null) {
+                    //use the JDK9 method
+                    cleanerClean.invoke(UNSAFE, buffer);
+                } else {
+                    Object cleaner = DirectByteBufferDeallocator.cleaner.invoke(buffer);
+                    cleanerClean.invoke(cleaner);
+                }
             }
         }
     }

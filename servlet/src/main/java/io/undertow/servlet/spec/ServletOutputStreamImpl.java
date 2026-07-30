@@ -145,12 +145,14 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
 
         if (listener == null) {
             ByteBuffer buffer = buffer();
-            if (buffer.remaining() < finalLength) {
-                writeTooLargeForBuffer(b, off, finalLength, buffer);
-            } else {
-                buffer.put(b, off, finalLength);
-                if (buffer.remaining() == 0) {
-                    writeBufferBlocking(false);
+            synchronized (buffer) {
+                if (buffer.remaining() < finalLength) {
+                    writeTooLargeForBuffer(b, off, finalLength, buffer);
+                } else {
+                    buffer.put(b, off, finalLength);
+                    if (buffer.remaining() == 0) {
+                        writeBufferBlocking(false);
+                    }
                 }
             }
             updateWritten(finalLength);
@@ -251,7 +253,9 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
         try {
             ByteBuffer buffer = buffer();
             if (buffer.remaining() > len) {
-                buffer.put(b, off, len);
+                synchronized (buffer) {
+                    buffer.put(b, off, len);
+                }
             } else {
                 buffer.flip();
                 boolean clearBuffer = true;
@@ -281,7 +285,9 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
                     } while (written < toWrite);
                 } finally {
                     if (clearBuffer && buffer != null) {
-                        buffer.compact();
+                        synchronized (buffer) {
+                            buffer.compact();
+                        }
                     }
                 }
             }
@@ -316,27 +322,29 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
                 setFlags(FLAG_WRITE_STARTED);
             } else {
                 ByteBuffer buffer = buffer();
-                if (len < buffer.remaining()) {
-                    Buffers.copy(buffer, buffers, 0, buffers.length);
-                } else {
-                    if (channel == null) {
-                        channel = servletRequestContext.getExchange().getResponseChannel();
-                    }
-                    if (buffer.position() == 0) {
-                        writeBlocking(buffers, 0, buffers.length, len);
+                synchronized (buffer) {
+                    if (len < buffer.remaining()) {
+                            Buffers.copy(buffer, buffers, 0, buffers.length);
                     } else {
-                        final ByteBuffer[] newBuffers = new ByteBuffer[buffers.length + 1];
-                        buffer.flip();
-                        try {
-                            newBuffers[0] = buffer;
-                            System.arraycopy(buffers, 0, newBuffers, 1, buffers.length);
-                            writeBlocking(newBuffers, 0, newBuffers.length, len + buffer.remaining());
-                        } finally {
-                            if (buffer != null)
-                                buffer.clear();
+                        if (channel == null) {
+                            channel = servletRequestContext.getExchange().getResponseChannel();
                         }
+                        if (buffer.position() == 0) {
+                            writeBlocking(buffers, 0, buffers.length, len);
+                        } else {
+                            final ByteBuffer[] newBuffers = new ByteBuffer[buffers.length + 1];
+                            buffer.flip();
+                            try {
+                                newBuffers[0] = buffer;
+                                System.arraycopy(buffers, 0, newBuffers, 1, buffers.length);
+                                writeBlocking(newBuffers, 0, newBuffers.length, len + buffer.remaining());
+                            } finally {
+                                if (buffer != null)
+                                    buffer.clear();
+                            }
+                        }
+                        setFlags(FLAG_WRITE_STARTED);
                     }
-                    setFlags(FLAG_WRITE_STARTED);
                 }
             }
 
@@ -348,38 +356,40 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
             //even though we are in async mode we are still buffering
             try {
                 ByteBuffer buffer = buffer();
-                if (buffer.remaining() > len) {
-                    Buffers.copy(buffer, buffers, 0, buffers.length);
-                } else {
-                    final ByteBuffer[] bufs = new ByteBuffer[buffers.length + 1];
-                    buffer.flip();
-                    try {
-                        bufs[0] = buffer;
-                        System.arraycopy(buffers, 0, bufs, 1, buffers.length);
-                        long toWrite = Buffers.remaining(bufs);
-                        long res;
-                        long written = 0;
-                        createChannel();
-                        setFlags(FLAG_WRITE_STARTED);
-                        do {
-                            res = channel.write(bufs);
-                            written += res;
-                            if (res == 0) {
-                                //write it out with a listener
-                                //but we need to copy any extra data
-                                //TODO: should really allocate from the pool here
-                                final ByteBuffer copy = ByteBuffer.allocate((int) Buffers.remaining(buffers));
-                                Buffers.copy(copy, buffers, 0, buffers.length);
-                                copy.flip();
-                                this.buffersToWrite = new ByteBuffer[] { buffer, copy };
-                                clearFlags(FLAG_READY);
-                                channel.resumeWrites();
-                                return;
-                            }
-                        } while (written < toWrite);
-                    } finally {
-                        if (buffer != null)
-                            buffer.compact();
+                synchronized (buffer) {
+                    if (buffer.remaining() > len) {
+                        Buffers.copy(buffer, buffers, 0, buffers.length);
+                    } else {
+                        final ByteBuffer[] bufs = new ByteBuffer[buffers.length + 1];
+                        buffer.flip();
+                        try {
+                            bufs[0] = buffer;
+                            System.arraycopy(buffers, 0, bufs, 1, buffers.length);
+                            long toWrite = Buffers.remaining(bufs);
+                            long res;
+                            long written = 0;
+                            createChannel();
+                            setFlags(FLAG_WRITE_STARTED);
+                            do {
+                                res = channel.write(bufs);
+                                written += res;
+                                if (res == 0) {
+                                    //write it out with a listener
+                                    //but we need to copy any extra data
+                                    //TODO: should really allocate from the pool here
+                                    final ByteBuffer copy = ByteBuffer.allocate((int) Buffers.remaining(buffers));
+                                    Buffers.copy(copy, buffers, 0, buffers.length);
+                                    copy.flip();
+                                    this.buffersToWrite = new ByteBuffer[] { buffer, copy };
+                                    clearFlags(FLAG_READY);
+                                    channel.resumeWrites();
+                                    return;
+                                }
+                            } while (written < toWrite);
+                        } finally {
+                            if (buffer != null)
+                                buffer.compact();
+                        }
                     }
                 }
             } finally {
@@ -535,18 +545,20 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
             //we have some data in the buffer, we can just write it out
             //if the write fails we just compact, rather than changing the ready state
             setFlags(FLAG_WRITE_STARTED);
-            buffer.flip();
-            try {
-                long res;
-                do {
-                    res = channel.write(buffer);
-                } while (buffer.hasRemaining() && res != 0);
-                if (!buffer.hasRemaining()) {
-                    channel.flush();
+            synchronized(buffer) {
+                buffer.flip();
+                try {
+                    long res;
+                    do {
+                        res = channel.write(buffer);
+                    } while (buffer.hasRemaining() && res != 0);
+                    if (!buffer.hasRemaining()) {
+                        channel.flush();
+                    }
+                } finally {
+                    if (buffer != null)
+                        buffer.compact();
                 }
-            } finally {
-                if (buffer != null)
-                    buffer.compact();
             }
         }
     }
@@ -601,18 +613,20 @@ public class ServletOutputStreamImpl extends ServletOutputStream implements Buff
         if (channel == null) {
             channel = servletRequestContext.getExchange().getResponseChannel();
         }
-        buffer.flip();
-        try {
-            while (buffer.hasRemaining()) {
-                int result = writeFinal ? channel.writeFinal(buffer) : channel.write(buffer);
-                if (result == 0) {
-                    channel.awaitWritable();
+        synchronized (buffer) {
+            buffer.flip();
+            try {
+                while (buffer.hasRemaining()) {
+                    int result = writeFinal ? channel.writeFinal(buffer) : channel.write(buffer);
+                    if (result == 0) {
+                        channel.awaitWritable();
+                    }
                 }
+            } finally {
+                if (buffer != null)
+                    buffer.compact();
+                setFlags(FLAG_WRITE_STARTED);
             }
-        } finally {
-            if (buffer != null)
-                buffer.compact();
-            setFlags(FLAG_WRITE_STARTED);
         }
     }
 
